@@ -92,7 +92,13 @@ def _browser_login(email: str, password: str, totp_secret: str) -> str:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
+            # channel="chromium" = Chromium's "new" headless mode, which looks like a normal
+            # browser (the default headless shell is trivially detectable).
+            channel="chromium",
             headless=True,
+            # Playwright adds --enable-automation by default, which sets navigator.webdriver
+            # and is one of the things Google's "browser may not be secure" check looks for.
+            ignore_default_args=["--enable-automation"],
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -167,6 +173,10 @@ def _do_login(page, email, password, totp_secret, PWTimeout):
     # 2) password
     box = _wait_for_input(page, _PASS_SEL, r"enter your password|password", 30000, PWTimeout)
     if box is None:
+        if "rejected" in page.url:
+            raise LoginError(
+                "Google rejected the sign-in (\"this browser or app may not be secure\") right after the email step. " + _where(page)
+            )
         raise LoginError("Google didn't ask for the password. " + _where(page))
     box.fill(password)
     box.press("Enter")
