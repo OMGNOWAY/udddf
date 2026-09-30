@@ -248,8 +248,9 @@ def _do_login(page, email, password, totp_secret, PWTimeout):
     box.press("Enter")
 
     # 3) whatever comes next: YouTube (success), a 2FA code, or a challenge/rejection
-    deadline = time.time() + 45
+    deadline = time.time() + 60
     totp_sent = False
+    tried_other_way = False
     while time.time() < deadline:
         url = page.url
         host = urlparse(url).hostname or ""
@@ -289,6 +290,21 @@ def _do_login(page, email, password, totp_secret, PWTimeout):
             continue
 
         if "/challenge/" in url:
+            # Phone/SMS style prompts can't be automated. If the account has an authenticator app
+            # set up, "Try another way" -> authenticator leads to the TOTP page handled above.
+            if totp_secret and not tried_other_way:
+                tried_other_way = True
+                if _click_first(page, ['button:has-text("Try another way")', 'text=/try another way/i']):
+                    page.wait_for_timeout(2000)
+                    if _click_first(page, ['text=/authenticator/i', 'text=/verification code from/i']):
+                        page.wait_for_timeout(2500)
+                        continue
+            if "/challenge/iap" in url:
+                raise LoginError(
+                    "Google wants to verify a phone number by SMS, which can't be automated. "
+                    "Turn on 2-step verification with an authenticator app for the account and set GOOGLE_TOTP_SECRET. "
+                    + _where(page)
+                )
             raise LoginError("Google wants extra verification that can't be automated. " + _where(page))
 
         if "speedbump" in url or _visible(page, 'button:has-text("Not now")'):
