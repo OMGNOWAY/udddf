@@ -99,6 +99,25 @@ TELEGRAM_BOT_TOKEN=<bot token from BotFather>
 TELEGRAM_CHAT_ID=<chat, group, or channel ID>
 ```
 
+### YouTube Sign-In (Optional)
+
+YouTube often blocks datacenter IPs ("confirm you're not a bot"). Give the backend a
+**spare** Google account and it signs in by itself with a headless browser:
+
+```
+GOOGLE_EMAIL=<spare account email>
+GOOGLE_PASSWORD=<its password>
+GOOGLE_TOTP_SECRET=<only if it uses an authenticator app>   # optional
+ADMIN_TOKEN=<any long random string>                        # for the manual endpoint
+```
+
+- Automatic: when YouTube asks for sign-in, the API logs in, saves the cookies and retries
+  the request (at most one attempt every 15 minutes).
+- Manual: `POST /api/cookies/login` with header `X-Admin-Token: <ADMIN_TOKEN>`.
+- Google blocks a lot of automated logins, so this can fail. Set
+  `GOOGLE_LOGIN_DEBUG_DIR` to save a screenshot of where it got stuck.
+- Uploading a `cookies.txt` with `POST /api/cookies` still works as a fallback.
+
 ## CLI Usage
 
 ```bash
