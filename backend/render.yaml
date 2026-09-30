@@ -7,3 +7,13 @@ services:
     envVars:
       - key: FRONTEND_URL
         value: https://universal-downloader.vercel.app
+      # Secrets: set these in the Render dashboard (they are not stored in git)
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: GOOGLE_EMAIL
+        sync: false
+      - key: GOOGLE_PASSWORD
+        sync: false
+      # Only if the spare account uses an authenticator app for 2-step verification
+      - key: GOOGLE_TOTP_SECRET
+        sync: false

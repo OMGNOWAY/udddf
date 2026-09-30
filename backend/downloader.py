@@ -11,6 +11,8 @@ import tempfile
 import re
 from yt_dlp.postprocessor.common import PostProcessor
 
+import google_login
+
 # ─── FFmpeg Detection ─────────────────────────────────────────────────
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +80,11 @@ class _CleanTagsPP(PostProcessor):
 
 # ─── YouTube Cookies ──────────────────────────────────────────────────
 # YouTube blocks most datacenter IPs ("confirm you're not a bot"). A cookies.txt
-# exported from a signed-in browser gets past that. Uploaded via POST /api/cookies.
+# from a signed-in browser gets past that. Two ways to get one onto the server:
+#   - upload it via POST /api/cookies
+#   - set GOOGLE_EMAIL / GOOGLE_PASSWORD (spare account) and let google_login.py
+#     sign in with a headless browser (automatically on a "not a bot" error, or
+#     on demand via POST /api/cookies/login)
 
 COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_PATH") or os.path.join(_BACKEND_DIR, "youtube_cookies.txt")
 _COOKIES_MAX_BYTES = 512 * 1024
@@ -130,9 +136,26 @@ def clear_cookies():
 
 
 def cookies_info() -> dict:
+    auto = google_login.is_configured()
     if not os.path.isfile(COOKIES_PATH):
-        return {"loaded": False, "updatedAt": None}
-    return {"loaded": True, "updatedAt": os.path.getmtime(COOKIES_PATH)}
+        return {"loaded": False, "updatedAt": None, "autoLogin": auto}
+    return {"loaded": True, "updatedAt": os.path.getmtime(COOKIES_PATH), "autoLogin": auto}
+
+
+def auto_login_available() -> bool:
+    return google_login.is_configured()
+
+
+def login_with_google(cooldown: int | None = None) -> int:
+    """Sign in with GOOGLE_EMAIL / GOOGLE_PASSWORD and store the cookies. Returns the cookie count.
+
+    Raises google_login.LoginError if the login fails or was tried too recently.
+    """
+    text = google_login.fetch_cookies(cooldown)
+    try:
+        return save_cookies(text)
+    except ValueError as e:
+        raise google_login.LoginError(f"Logged in, but the cookies weren't usable: {e}")
 
 
 @contextlib.contextmanager

@@ -5,3 +5,5 @@ pydantic>=2.6.0
 python-multipart>=0.0.9
 python-telegram-bot>=22.0
 python-dotenv>=1.0
+playwright>=1.55
+pyotp>=2.9

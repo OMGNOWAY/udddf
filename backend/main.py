@@ -15,7 +15,11 @@ import urllib.parse
 import hmac
 from starlette.background import BackgroundTask
 
-from downloader import analyze_url, download_video, save_cookies, clear_cookies, cookies_info
+from downloader import (
+    analyze_url, download_video, save_cookies, clear_cookies, cookies_info,
+    login_with_google, auto_login_available,
+)
+from google_login import LoginError
 
 app = FastAPI(title="Video Downloader API")
 
@@ -152,15 +156,42 @@ MIME_MAP = {
     "ogg": "audio/ogg",
 }
 
+def needs_signin(err: Exception) -> bool:
+    """True when YouTube is demanding a signed-in session (bot check / dead cookies)."""
+    msg = str(err).lower()
+    return "not a bot" in msg or "cookies are no longer valid" in msg
+
+async def try_auto_login() -> bool:
+    """Sign in to the spare Google account (if configured) and store fresh cookies."""
+    if not auto_login_available():
+        return False
+    try:
+        count = await asyncio.wait_for(asyncio.to_thread(login_with_google), timeout=120)
+        print(f"[api] Google auto-login OK, saved {count} cookies")
+        return True
+    except LoginError as e:
+        print(f"[api] Google auto-login failed: {e}")
+    except asyncio.TimeoutError:
+        print("[api] Google auto-login timed out")
+    except Exception as e:
+        print(f"[api] Google auto-login error: {e}")
+    return False
+
+async def run_analyze(url: str):
+    return await asyncio.wait_for(asyncio.to_thread(analyze_url, url), timeout=45)
+
 @app.post("/api/analyze")
 async def api_analyze(req: AnalyzeRequest, request: Request):
     check_rate_limit(request)
     validate_public_url(req.url)
     try:
-        data = await asyncio.wait_for(
-            asyncio.to_thread(analyze_url, req.url),
-            timeout=45
-        )
+        try:
+            data = await run_analyze(req.url)
+        except Exception as first:
+            if needs_signin(first) and await try_auto_login():
+                data = await run_analyze(req.url)
+            else:
+                raise
         if not data:
             raise HTTPException(status_code=400, detail="Could not extract metadata from this URL")
         return data
@@ -171,11 +202,12 @@ async def api_analyze(req: AnalyzeRequest, request: Request):
     except Exception as e:
         print(f"[api] Analyze error for {req.url[:60]}: {e}")
         traceback.print_exc()
-        if "not a bot" in str(e):
-            raise HTTPException(
-                status_code=400,
-                detail="YouTube is asking this server to sign in. Use the YouTube login button (top right) to add cookies.",
-            )
+        if needs_signin(e):
+            if auto_login_available():
+                detail = "YouTube is asking this server to sign in and the automatic Google login didn't work. Check the server logs."
+            else:
+                detail = "YouTube is asking this server to sign in. Set GOOGLE_EMAIL and GOOGLE_PASSWORD on the server, or upload cookies with POST /api/cookies."
+            raise HTTPException(status_code=400, detail=detail)
         raise HTTPException(status_code=400, detail="Could not analyze the provided URL.")
 
 @app.post("/api/download")
@@ -187,10 +219,19 @@ async def api_download(req: DownloadRequest, request: Request):
 
     try:
         os.makedirs(TEMP_DIR, exist_ok=True)
-        filepath = await asyncio.wait_for(
-            download_video(req.url, req.formatId, TEMP_DIR),
-            timeout=300
-        )
+        try:
+            filepath = await asyncio.wait_for(
+                download_video(req.url, req.formatId, TEMP_DIR),
+                timeout=300
+            )
+        except Exception as first:
+            if needs_signin(first) and await try_auto_login():
+                filepath = await asyncio.wait_for(
+                    download_video(req.url, req.formatId, TEMP_DIR),
+                    timeout=300
+                )
+            else:
+                raise
 
         ext = os.path.splitext(filepath)[1].lstrip('.') or "bin"
         mime = MIME_MAP.get(ext, "application/octet-stream")
@@ -217,8 +258,9 @@ async def api_download(req: DownloadRequest, request: Request):
 
 
 # ─── YouTube cookies (for servers YouTube blocks) ─────────────────────
-# Uploads are locked behind ADMIN_TOKEN (set it as an env var on Render).
-# If ADMIN_TOKEN is not set, uploading is disabled.
+# Uploads and manual login are locked behind ADMIN_TOKEN (set it as an env var on Render).
+# If ADMIN_TOKEN is not set, those endpoints are disabled. Automatic login on a
+# "not a bot" error needs no token, only GOOGLE_EMAIL / GOOGLE_PASSWORD.
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
@@ -248,6 +290,24 @@ async def api_cookies_save(
         count = save_cookies(req.cookies)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "count": count}
+
+@app.post("/api/cookies/login")
+async def api_cookies_login(
+    request: Request,
+    x_admin_token: str | None = Header(default=None),
+):
+    """Sign in to the spare Google account (GOOGLE_EMAIL / GOOGLE_PASSWORD) and store fresh cookies."""
+    check_rate_limit(request)
+    await require_admin(x_admin_token)
+    if not auto_login_available():
+        raise HTTPException(status_code=503, detail="Set GOOGLE_EMAIL and GOOGLE_PASSWORD on the server.")
+    try:
+        count = await asyncio.wait_for(asyncio.to_thread(login_with_google, 60), timeout=120)
+    except LoginError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=408, detail="Google login timed out.")
     return {"ok": True, "count": count}
 
 @app.delete("/api/cookies")
