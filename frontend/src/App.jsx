@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Download, Link2, AlertCircle, CheckCircle2, Loader2, Video, Music, Info, ExternalLink, Layers, ClipboardPaste } from 'lucide-react';
+import { Download, Link2, AlertCircle, CheckCircle2, Loader2, Video, Music, Info, ExternalLink, Layers, ClipboardPaste, KeyRound } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -9,6 +9,7 @@ import FaultyTerminal from './components/FaultyTerminal';
 import SpotlightCard from './components/SpotlightCard';
 import BatchMode from './components/BatchMode';
 import ProfileCard from './components/ProfileCard';
+import CookiesModal from './components/CookiesModal';
 
 function cn(...inputs) {
   return twMerge(clsx(inputs));
@@ -23,6 +24,7 @@ function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [mode, setMode] = useState('single'); // 'single' | 'batch'
+  const [showCookies, setShowCookies] = useState(false);
 
   const handleAnalyze = async (e) => {
     e.preventDefault();
@@ -474,6 +476,18 @@ function App() {
         </div>
 
       </motion.div>
+
+      {/* YouTube login button + modal */}
+      <button
+        type="button"
+        onClick={() => setShowCookies(true)}
+        className="fixed top-4 right-4 z-50 flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-slate-300 hover:text-brand-400 transition-colors"
+        style={{ borderRadius: '12px', background: 'rgba(15,23,42,0.5)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.08)' }}
+      >
+        <KeyRound className="w-4 h-4" />
+        YouTube login
+      </button>
+      <CookiesModal open={showCookies} onClose={() => setShowCookies(false)} />
 
       {/* Credits — compact info pill */}
       <motion.div
