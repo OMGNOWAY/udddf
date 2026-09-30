@@ -212,6 +212,16 @@ def _do_login(page, email, password, totp_secret, PWTimeout):
         if "rejected" in url or "deniedsignin" in url:
             raise LoginError("Google rejected the sign-in (it blocks a lot of automated / datacenter logins). " + _where(page))
 
+        if "/challenge/pwd" in url:
+            # Still the password page (Google's URL for it contains "challenge"). Either it is
+            # about to move on, or it is showing an error.
+            if _visible(page, 'text=/wrong password/i'):
+                raise LoginError("Google says the password is wrong.")
+            if _visible(page, 'input[name="ca"]'):
+                raise LoginError("Google is showing a captcha, which can't be automated. " + _where(page))
+            page.wait_for_timeout(500)
+            continue
+
         if "/challenge/" in url:
             raise LoginError("Google wants extra verification that can't be automated. " + _where(page))
 
