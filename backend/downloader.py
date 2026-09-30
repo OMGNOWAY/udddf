@@ -36,6 +36,10 @@ _DL_SEM = threading.Semaphore(2)
 # by setting YTDLP_NO_CHECK_CERTIFICATE=1.
 _NO_CHECK_CERT = os.getenv("YTDLP_NO_CHECK_CERTIFICATE", "").strip().lower() in ("1", "true", "yes")
 
+# Optional: override yt-dlp's YouTube player clients, comma separated
+# (e.g. YTDLP_PLAYER_CLIENTS=default,web_embedded). Leave unset for yt-dlp's defaults.
+_PLAYER_CLIENTS = [c.strip() for c in os.getenv("YTDLP_PLAYER_CLIENTS", "").split(",") if c.strip()]
+
 
 def _base_opts() -> dict:
     """Return a fresh copy of base yt-dlp options (never mutate the global)."""
@@ -52,6 +56,8 @@ def _base_opts() -> dict:
     }
     if FFMPEG_LOCATION:
         opts['ffmpeg_location'] = FFMPEG_LOCATION
+    if _PLAYER_CLIENTS:
+        opts['extractor_args'] = {'youtube': {'player_client': _PLAYER_CLIENTS}}
     return opts
 
 
