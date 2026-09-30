@@ -1,7 +1,7 @@
-"""Headless Google sign-in -> YouTube cookies.
+"""Automated Google sign-in -> YouTube cookies.
 
-Logs into a spare Google account with a headless Chromium (Playwright) and
-returns a Netscape-format cookies.txt string that downloader.save_cookies()
+Logs into a spare Google account with a real Google Chrome running on a virtual
+display (Xvfb) via Playwright, and returns a Netscape-format cookies.txt string that downloader.save_cookies()
 accepts. Use a throwaway account, never your main one.
 
 Env vars:
@@ -13,6 +13,8 @@ Env vars:
 """
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from urllib.parse import urlparse
@@ -84,51 +86,106 @@ def fetch_cookies(cooldown: int | None = None) -> str:
 
 # ─── Browser flow ─────────────────────────────────────────────────────
 
+_CHROME_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--window-size=1280,900",
+]
+
+
+def _start_xvfb():
+    """Start a virtual display so a real, non-headless Chrome can run on a server.
+
+    Returns (process, display) or (None, None) if Xvfb isn't available.
+    """
+    if os.environ.get("DISPLAY") or not shutil.which("Xvfb"):
+        return None, None
+    for display in (":99", ":98", ":97"):
+        try:
+            proc = subprocess.Popen(
+                ["Xvfb", display, "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return None, None
+        time.sleep(1.5)
+        if proc.poll() is None:
+            return proc, display
+    return None, None
+
+
+def _launch(p, display):
+    """Real Chrome in a visible window on the virtual display; headless Chromium as a fallback."""
+    if display:
+        try:
+            browser = p.chromium.launch(
+                channel="chrome",
+                headless=False,
+                # Playwright adds --enable-automation by default (sets navigator.webdriver,
+                # one of the things behind Google's "this browser may not be secure" check).
+                ignore_default_args=["--enable-automation"],
+                args=_CHROME_ARGS,
+                env={**os.environ, "DISPLAY": display},
+            )
+            return browser, True
+        except Exception as e:
+            first = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+            print(f"[google_login] real Chrome unavailable ({first}); falling back to headless Chromium", flush=True)
+    browser = p.chromium.launch(
+        channel="chromium",  # new headless mode; the default headless shell is trivially detectable
+        headless=True,
+        ignore_default_args=["--enable-automation"],
+        args=_CHROME_ARGS + ["--disable-gpu"],
+    )
+    return browser, False
+
+
 def _browser_login(email: str, password: str, totp_secret: str) -> str:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     except ImportError:
-        raise LoginError("playwright is not installed (pip install playwright && playwright install chromium).")
+        raise LoginError("playwright is not installed (pip install playwright && playwright install chrome chromium).")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            # channel="chromium" = Chromium's "new" headless mode, which looks like a normal
-            # browser (the default headless shell is trivially detectable).
-            channel="chromium",
-            headless=True,
-            # Playwright adds --enable-automation by default, which sets navigator.webdriver
-            # and is one of the things Google's "browser may not be secure" check looks for.
-            ignore_default_args=["--enable-automation"],
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        try:
-            major = browser.version.split(".")[0]
-            context = browser.new_context(
-                # Headless Chromium advertises "HeadlessChrome" in its UA, which Google flags.
-                user_agent=f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36",
-                locale="en-US",
-                timezone_id=os.getenv("GOOGLE_LOGIN_TIMEZONE", "America/New_York"),
-                viewport={"width": 1280, "height": 900},
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-            page = context.new_page()
-            page.set_default_timeout(20000)
+    xvfb, display = _start_xvfb()
+    try:
+        with sync_playwright() as p:
+            browser, real_chrome = _launch(p, display)
             try:
-                _do_login(page, email, password, totp_secret, PWTimeout)
-                # yt-dlp's wiki suggests grabbing cookies from robots.txt and then closing the
-                # session, so YouTube doesn't rotate them while a browser tab keeps using them.
-                page.goto("https://www.youtube.com/robots.txt", wait_until="domcontentloaded")
-                cookies = context.cookies()
+                ctx_args = dict(
+                    locale="en-US",
+                    timezone_id=os.getenv("GOOGLE_LOGIN_TIMEZONE", "America/New_York"),
+                    viewport={"width": 1280, "height": 900},
+                )
+                if not real_chrome:
+                    # Headless Chromium advertises "HeadlessChrome" in its UA, which Google flags.
+                    major = browser.version.split(".")[0]
+                    ctx_args["user_agent"] = (
+                        f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+                    )
+                context = browser.new_context(**ctx_args)
+                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                page = context.new_page()
+                page.set_default_timeout(20000)
+                try:
+                    _do_login(page, email, password, totp_secret, PWTimeout)
+                    # yt-dlp's wiki suggests grabbing cookies from robots.txt and then closing the
+                    # session, so YouTube doesn't rotate them while a browser tab keeps using them.
+                    page.goto("https://www.youtube.com/robots.txt", wait_until="domcontentloaded")
+                    cookies = context.cookies()
+                except Exception:
+                    _debug_screenshot(page)
+                    raise
+            finally:
+                browser.close()
+    finally:
+        if xvfb:
+            xvfb.terminate()
+            try:
+                xvfb.wait(timeout=5)
             except Exception:
-                _debug_screenshot(page)
-                raise
-        finally:
-            browser.close()
+                xvfb.kill()
 
     if not any(c["name"] in _SESSION_COOKIES for c in cookies):
         raise LoginError("Reached YouTube but the session isn't signed in (no Google session cookies).")

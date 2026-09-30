@@ -14,9 +14,13 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Headless Chromium for the Google auto-login (google_login.py)
+# Real Google Chrome + a virtual display (Xvfb) for the Google auto-login (google_login.py).
+# Chromium is also installed as a headless fallback.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install --with-deps chromium && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends xvfb && \
+    playwright install --with-deps chrome chromium && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
