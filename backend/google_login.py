@@ -172,6 +172,15 @@ def _do_login(page, email, password, totp_secret, PWTimeout):
 
     # 2) password
     box = _wait_for_input(page, _PASS_SEL, r"enter your password|password", 30000, PWTimeout)
+    if box is None and "/challenge/recaptcha" in page.url:
+        # "Verify it's you" bot check. Often it is just a Confirm button (invisible reCAPTCHA).
+        if _click_first(page, ['button:has-text("Confirm")', 'button:has-text("Verify")', 'button:has-text("Next")']):
+            box = _wait_for_input(page, _PASS_SEL, r"enter your password|password", 30000, PWTimeout)
+        if box is None:
+            raise LoginError(
+                "Google is showing its \"Verify it's you\" reCAPTCHA and it wasn't passed. A human has to solve that, so it can't be automated from this server. "
+                + _where(page)
+            )
     if box is None:
         if "rejected" in page.url:
             raise LoginError(
