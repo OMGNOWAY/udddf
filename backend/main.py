@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -12,9 +12,10 @@ import ipaddress
 import traceback
 import threading
 import urllib.parse
+import hmac
 from starlette.background import BackgroundTask
 
-from downloader import analyze_url, download_video
+from downloader import analyze_url, download_video, save_cookies, clear_cookies, cookies_info
 
 app = FastAPI(title="Video Downloader API")
 
@@ -171,6 +172,11 @@ async def api_analyze(req: AnalyzeRequest, request: Request):
     except Exception as e:
         print(f"[api] Analyze error for {req.url[:60]}: {e}")
         traceback.print_exc()
+        if "not a bot" in str(e):
+            raise HTTPException(
+                status_code=400,
+                detail="YouTube is asking this server to sign in. Use the YouTube login button (top right) to add cookies.",
+            )
         raise HTTPException(status_code=400, detail="Could not analyze the provided URL.")
 
 @app.post("/api/download")
@@ -209,3 +215,48 @@ async def api_download(req: DownloadRequest, request: Request):
         print(f"[api] Download error for {req.url[:60]}: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Download failed. Please try again.")
+
+
+# ─── YouTube cookies (for servers YouTube blocks) ─────────────────────
+# Uploads are locked behind ADMIN_TOKEN (set it as an env var on Render).
+# If ADMIN_TOKEN is not set, uploading is disabled.
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+class CookiesRequest(BaseModel):
+    cookies: str
+
+async def require_admin(token: str | None):
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Cookie upload is off. Set ADMIN_TOKEN on the server.")
+    if not token or not hmac.compare_digest(token.encode(), ADMIN_TOKEN.encode()):
+        await asyncio.sleep(1)
+        raise HTTPException(status_code=401, detail="Wrong token.")
+
+@app.get("/api/cookies/status")
+async def api_cookies_status():
+    return cookies_info()
+
+@app.post("/api/cookies")
+async def api_cookies_save(
+    req: CookiesRequest,
+    request: Request,
+    x_admin_token: str | None = Header(default=None),
+):
+    check_rate_limit(request)
+    await require_admin(x_admin_token)
+    try:
+        count = save_cookies(req.cookies)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "count": count}
+
+@app.delete("/api/cookies")
+async def api_cookies_clear(
+    request: Request,
+    x_admin_token: str | None = Header(default=None),
+):
+    check_rate_limit(request)
+    await require_admin(x_admin_token)
+    clear_cookies()
+    return {"ok": True}

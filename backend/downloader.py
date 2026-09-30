@@ -6,6 +6,8 @@ import shutil
 import threading
 import time
 import traceback
+import contextlib
+import tempfile
 
 # ─── FFmpeg Detection ─────────────────────────────────────────────────
 
@@ -51,6 +53,86 @@ def _base_opts() -> dict:
     if FFMPEG_LOCATION:
         opts['ffmpeg_location'] = FFMPEG_LOCATION
     return opts
+
+
+# ─── YouTube Cookies ──────────────────────────────────────────────────
+# YouTube blocks most datacenter IPs ("confirm you're not a bot"). A cookies.txt
+# exported from a signed-in browser gets past that. Uploaded via POST /api/cookies.
+
+COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_PATH") or os.path.join(_BACKEND_DIR, "youtube_cookies.txt")
+_COOKIES_MAX_BYTES = 512 * 1024
+
+
+def save_cookies(text: str) -> int:
+    """Validate a Netscape cookies.txt and store it. Returns the cookie count."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        raise ValueError("Cookies are empty.")
+    if len(text.encode("utf-8")) > _COOKIES_MAX_BYTES:
+        raise ValueError("Cookies file is too large.")
+
+    count = 0
+    has_google = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or (stripped.startswith("#") and not stripped.startswith("#HttpOnly_")):
+            continue
+        if len(line.split("\t")) != 7:
+            raise ValueError("Not a Netscape cookies.txt (each line needs 7 tab-separated fields).")
+        count += 1
+        if "youtube.com" in line or "google.com" in line:
+            has_google = True
+    if count == 0:
+        raise ValueError("No cookies found in that file.")
+    if not has_google:
+        raise ValueError("No youtube.com or google.com cookies in that file.")
+
+    if not text.startswith("# Netscape HTTP Cookie File") and not text.startswith("# HTTP Cookie File"):
+        text = "# Netscape HTTP Cookie File\n" + text
+
+    tmp = COOKIES_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text + "\n")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, COOKIES_PATH)
+    return count
+
+
+def clear_cookies():
+    try:
+        os.remove(COOKIES_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def cookies_info() -> dict:
+    if not os.path.isfile(COOKIES_PATH):
+        return {"loaded": False, "updatedAt": None}
+    return {"loaded": True, "updatedAt": os.path.getmtime(COOKIES_PATH)}
+
+
+@contextlib.contextmanager
+def _cookie_copy(platform: str):
+    """Yield a throwaway copy of the cookies file for YouTube calls (or None).
+
+    yt-dlp rewrites its cookie file on exit, so each call gets its own copy
+    to avoid concurrent calls clobbering the stored one.
+    """
+    if platform != "youtube" or not os.path.isfile(COOKIES_PATH):
+        yield None
+        return
+    tmp = os.path.join(tempfile.gettempdir(), f"ytc_{uuid.uuid4().hex}.txt")
+    try:
+        shutil.copyfile(COOKIES_PATH, tmp)
+        yield tmp
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 # ─── Platform Detection ───────────────────────────────────────────────
@@ -162,22 +244,27 @@ def analyze_url(url: str):
     }
     is_short = platform == "youtube" and content_type == "short"
 
-    with yt_dlp.YoutubeDL(_base_opts()) as ydl:
-        try:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                return None
-            formats = _build_formats(info, label_map[platform], is_short=is_short)
-            return {
-                "platform": platform,
-                "contentType": content_type,
-                "title": info.get('title'),
-                "thumbnailUrl": info.get('thumbnail'),
-                "durationSeconds": info.get('duration'),
-                "formats": formats,
-            }
-        except Exception as e:
-            raise Exception(f"Failed to analyze URL: {e}")
+    with _cookie_copy(platform) as cookie_tmp:
+        opts = _base_opts()
+        if cookie_tmp:
+            opts['cookiefile'] = cookie_tmp
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    return None
+                formats = _build_formats(info, label_map[platform], is_short=is_short)
+                return {
+                    "platform": platform,
+                    "contentType": content_type,
+                    "title": info.get('title'),
+                    "thumbnailUrl": info.get('thumbnail'),
+                    "durationSeconds": info.get('duration'),
+                    "formats": formats,
+                }
+            except Exception as e:
+                raise Exception(f"Failed to analyze URL: {e}")
 
 
 # ─── Download ─────────────────────────────────────────────────────────
@@ -222,13 +309,19 @@ async def download_video(url: str, format_id: str, output_dir: str):
                 'merger': ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']
             }
 
+    platform = detect_platform(url)["platform"]
+
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             def _run():
                 with _DL_SEM:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        ydl.download([url])
+                    with _cookie_copy(platform) as cookie_tmp:
+                        run_opts = dict(opts)
+                        if cookie_tmp:
+                            run_opts['cookiefile'] = cookie_tmp
+                        with yt_dlp.YoutubeDL(run_opts) as ydl:
+                            ydl.download([url])
 
             await asyncio.to_thread(_run)
 
