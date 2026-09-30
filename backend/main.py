@@ -166,7 +166,7 @@ async def try_auto_login() -> bool:
     if not auto_login_available():
         return False
     try:
-        count = await asyncio.wait_for(asyncio.to_thread(login_with_google), timeout=120)
+        count = await asyncio.wait_for(asyncio.to_thread(login_with_google), timeout=180)
         print(f"[api] Google auto-login OK, saved {count} cookies")
         return True
     except LoginError as e:
@@ -303,7 +303,7 @@ async def api_cookies_login(
     if not auto_login_available():
         raise HTTPException(status_code=503, detail="Set GOOGLE_EMAIL and GOOGLE_PASSWORD on the server.")
     try:
-        count = await asyncio.wait_for(asyncio.to_thread(login_with_google, 60), timeout=120)
+        count = await asyncio.wait_for(asyncio.to_thread(login_with_google, 60), timeout=180)
     except LoginError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except asyncio.TimeoutError:

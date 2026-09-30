@@ -129,24 +129,47 @@ def _browser_login(email: str, password: str, totp_secret: str) -> str:
     return _to_netscape(cookies)
 
 
+_EMAIL_SEL = 'input[type="email"], input#identifierId, input[name="identifier"], input[autocomplete="username"]'
+_PASS_SEL = 'input[type="password"], input[name="Passwd"]'
+
+
+def _wait_for_input(page, selectors, label, timeout_ms, PWTimeout):
+    """Return a visible input matching the selectors, or (fallback) the one with this label."""
+    first = page.locator(selectors).first
+    try:
+        first.wait_for(state="visible", timeout=timeout_ms)
+        return first
+    except PWTimeout:
+        pass
+    by_label = page.get_by_label(re.compile(label, re.I)).first
+    try:
+        by_label.wait_for(state="visible", timeout=5000)
+        return by_label
+    except PWTimeout:
+        return None
+
+
 def _do_login(page, email, password, totp_secret, PWTimeout):
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    try:
+        # Google's page is JS-rendered and slow on a small server; let it settle.
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PWTimeout:
+        pass
 
     # 1) email
-    try:
-        page.wait_for_selector('input[type="email"]', state="visible")
-    except PWTimeout:
+    box = _wait_for_input(page, _EMAIL_SEL, r"email or phone", 45000, PWTimeout)
+    if box is None:
         raise LoginError("Google's sign-in page didn't show an email box. " + _where(page))
-    page.fill('input[type="email"]', email)
-    page.keyboard.press("Enter")
+    box.fill(email)
+    box.press("Enter")
 
     # 2) password
-    try:
-        page.wait_for_selector('input[type="password"]', state="visible", timeout=25000)
-    except PWTimeout:
+    box = _wait_for_input(page, _PASS_SEL, r"enter your password|password", 30000, PWTimeout)
+    if box is None:
         raise LoginError("Google didn't ask for the password. " + _where(page))
-    page.fill('input[type="password"]', password)
-    page.keyboard.press("Enter")
+    box.fill(password)
+    box.press("Enter")
 
     # 3) whatever comes next: YouTube (success), a 2FA code, or a challenge/rejection
     deadline = time.time() + 45
@@ -222,7 +245,14 @@ def _where(page) -> str:
         text = re.sub(r"\s+", " ", page.inner_text("body")).strip()[:160]
     except Exception:
         return ""
-    return f"(stuck at {path!r}: {text!r})"
+    try:
+        inputs = page.eval_on_selector_all(
+            "input",
+            "els => els.map(e => [e.type, e.name, e.id, e.getAttribute('aria-label'), e.offsetParent !== null ? 'visible' : 'hidden'].join('/'))",
+        )
+    except Exception:
+        inputs = []
+    return f"(stuck at {path!r}: {text!r}; inputs: {inputs})"
 
 
 def _debug_screenshot(page):
