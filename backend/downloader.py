@@ -8,6 +8,8 @@ import time
 import traceback
 import contextlib
 import tempfile
+import re
+from yt_dlp.postprocessor.common import PostProcessor
 
 # ─── FFmpeg Detection ─────────────────────────────────────────────────
 
@@ -59,6 +61,19 @@ def _base_opts() -> dict:
     if _PLAYER_CLIENTS:
         opts['extractor_args'] = {'youtube': {'player_client': _PLAYER_CLIENTS}}
     return opts
+
+
+class _CleanTagsPP(PostProcessor):
+    """Tidy up MP3 tags before they are written: artist name and album."""
+
+    def run(self, info):
+        artist = info.get('artist') or info.get('creator') or info.get('uploader') or ''
+        artist = re.sub(r'\s*-\s*Topic$', '', artist, flags=re.I).strip()  # "Artist - Topic" -> "Artist"
+        if artist:
+            info['artist'] = artist
+        if not info.get('album') and info.get('title'):
+            info['album'] = info['title']
+        return [], info
 
 
 # ─── YouTube Cookies ──────────────────────────────────────────────────
@@ -297,11 +312,24 @@ async def download_video(url: str, format_id: str, output_dir: str):
             'outtmpl': output_template,
         })
         if HAS_FFMPEG:
-            opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '320',
-            }]
+            opts['writethumbnail'] = True
+            opts['postprocessors'] = [
+                # Convert the thumbnail to a square-cropped jpg so players show it as cover art
+                {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg', 'when': 'before_dl'},
+                {
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '320',
+                },
+                {'key': 'FFmpegMetadata', 'add_metadata': True, 'add_chapters': False, 'add_infojson': None},
+                {'key': 'EmbedThumbnail'},
+            ]
+            opts['postprocessor_args'] = {
+                'thumbnailsconvertor+ffmpeg_o': [
+                    '-c:v', 'mjpeg',
+                    '-vf', "crop='if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'",
+                ],
+            }
     else:
         opts.update({
             'format': format_id,
@@ -327,6 +355,8 @@ async def download_video(url: str, format_id: str, output_dir: str):
                         if cookie_tmp:
                             run_opts['cookiefile'] = cookie_tmp
                         with yt_dlp.YoutubeDL(run_opts) as ydl:
+                            if is_audio_only and HAS_FFMPEG:
+                                ydl.add_post_processor(_CleanTagsPP(), when='pre_process')
                             ydl.download([url])
 
             await asyncio.to_thread(_run)
@@ -334,7 +364,7 @@ async def download_video(url: str, format_id: str, output_dir: str):
             # Find the produced file
             for fname in os.listdir(job_dir):
                 full = os.path.join(job_dir, fname)
-                if os.path.isfile(full) and not fname.endswith(('.part', '.ytdl', '.temp')):
+                if os.path.isfile(full) and not fname.endswith(('.part', '.ytdl', '.temp', '.jpg', '.jpeg', '.png', '.webp')):
                     return full
 
             raise FileNotFoundError("Downloaded file not found in job directory")
